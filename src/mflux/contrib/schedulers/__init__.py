@@ -36,15 +36,21 @@ from .scheduler_metadata import (
 )
 
 # Import all built-in schedulers
-from .builtin import DDIMFlowScheduler
+from .builtin import DDIMFlowScheduler, STORKScheduler
 
 __version__ = "0.1.0"
 
 # Auto-register built-in schedulers
 SchedulerFactory.register("ddim", DDIMFlowScheduler)
+SchedulerFactory.register("stork", STORKScheduler)  # Default to order 2
+
+# Factory functions for STORK variants
+SchedulerFactory.register("stork-2", lambda config, **kw: STORKScheduler(config, order=2, **kw))
+SchedulerFactory.register("stork-4", lambda config, **kw: STORKScheduler(config, order=4, **kw))
 
 # Aliases for convenience
 SchedulerFactory.register("DDIMFlowScheduler", DDIMFlowScheduler)
+SchedulerFactory.register("STORKScheduler", STORKScheduler)
 
 __all__ = [
     # Core classes
@@ -54,6 +60,7 @@ __all__ = [
     "SchedulerStatus",
     # Built-in schedulers
     "DDIMFlowScheduler",
+    "STORKScheduler",
     # Registry
     "SCHEDULER_METADATA",
     "register_metadata",

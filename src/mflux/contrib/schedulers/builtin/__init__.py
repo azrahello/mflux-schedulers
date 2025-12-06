@@ -6,7 +6,9 @@ All schedulers here are tested and compatible with the latest mflux version.
 """
 
 from .ddim_flow_scheduler import DDIMFlowScheduler
+from .stork_scheduler import STORKScheduler
 
 __all__ = [
     "DDIMFlowScheduler",
+    "STORKScheduler",
 ]
