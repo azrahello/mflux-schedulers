@@ -90,44 +90,79 @@ config = Config(
 
 ---
 
-### STORK (Coming Soon)
+### STORK ⭐
 
-**Name**: `stork`, `stork-2`, `stork-4`  
-**Status**: Beta  
-**Speed**: ★★★★☆  
-**Quality**: ★★★★★  
+**Name**: `stork`, `stork-2`, `stork-4`
+**Status**: Stable
+**Speed**: ★★★★☆
+**Quality**: ★★★★★
 
-Stabilized Runge-Kutta methods with Taylor approximations.
+Stabilized Runge-Kutta methods with Taylor approximations for virtual NFEs.
 
-**Best for**: Highest quality with moderate speed  
+```python
+# STORK-2 (Heun's method, faster)
+config = Config(scheduler="mflux.contrib.schedulers.stork-2", num_inference_steps=20)
+
+# STORK-4 (RK4, highest quality)
+config = Config(scheduler="mflux.contrib.schedulers.stork-4", num_inference_steps=15)
+```
+
+**Best for**: Highest quality with moderate speed, complex scenes
 **Papers**: [STORK](https://arxiv.org/html/2505.24210v2)
 
 ---
 
-### ER-SDE Beta (Coming Soon)
+### ER-SDE Beta
 
-**Name**: `er_sde_beta`  
-**Status**: Stable  
-**Speed**: ★★★☆☆  
-**Quality**: ★★★★★  
+**Name**: `er_sde_beta`
+**Status**: Stable
+**Speed**: ★★★☆☆
+**Quality**: ★★★★★
 
 Extended Reverse-Time SDE with Beta timestep distribution for superior detail preservation.
 
-**Best for**: Maximum detail, natural appearance  
-**Papers**: [Beta Sampling](https://arxiv.org/abs/2407.12173)
+```python
+# Deterministic Beta sampling (best quality)
+config = Config(scheduler="mflux.contrib.schedulers.er_sde_beta", num_inference_steps=30)
+
+# With SDE component (more natural)
+config = Config(
+    scheduler="mflux.contrib.schedulers.er_sde_beta",
+    num_inference_steps=30,
+    scheduler_kwargs={"gamma": 0.3, "beta_strength": 1.0}
+)
+```
+
+**Best for**: Maximum detail, natural appearance, portraits
+**Papers**: [ER-SDE](https://arxiv.org/abs/2309.06169), [Beta Sampling](https://arxiv.org/abs/2407.12173)
 
 ---
 
-### Advanced Scheduler (Coming Soon)
+### Advanced Scheduler
 
-**Name**: `advanced`  
-**Status**: Beta  
-**Speed**: ★★★★☆  
-**Quality**: ★★★★☆  
+**Name**: `advanced`
+**Status**: Beta
+**Speed**: ★★★★☆
+**Quality**: ★★★★☆
 
-Multiple noise schedules: Cosine, Exponential, Sqrt, Scaled Linear, Beta.
+Multiple noise schedules: Linear, Cosine, Exponential, Sqrt, Scaled Linear, Beta.
+
+```python
+# Cosine schedule (smooth, good perceptual quality)
+config = Config(
+    scheduler="mflux.contrib.schedulers.advanced",
+    scheduler_kwargs={"schedule": "cosine"}
+)
+
+# Beta distribution (concentrates steps at edges)
+config = Config(
+    scheduler="mflux.contrib.schedulers.advanced",
+    scheduler_kwargs={"schedule": "beta", "beta_alpha": 2.0, "beta_beta": 1.0}
+)
+```
 
 **Best for**: Experimentation with different noise schedules
+**Papers**: [DDPM](https://arxiv.org/abs/2006.11239), [Beta Sampling](https://arxiv.org/abs/2407.12173)
 
 ---
 
@@ -140,11 +175,11 @@ import mflux.contrib.schedulers as schedulers
 
 # List all schedulers
 print(schedulers.list_schedulers())
-# ['ddim']
+# ['ddim', 'stork', 'stork-2', 'stork-4', 'er_sde_beta', 'advanced']
 
 # List only stable schedulers
 print(schedulers.list_schedulers('stable'))
-# ['ddim']
+# ['ddim', 'stork', 'stork-2', 'stork-4', 'er_sde_beta']
 ```
 
 ### Get Scheduler Info
@@ -191,6 +226,37 @@ config = Config(
   - 0.3 = balanced
   - 1.0 = maximum stochasticity
 - `num_train_timesteps` (int, default=1000): Total timestep space to sample from
+
+#### STORK
+
+- `order` (int, default=2): Runge-Kutta order
+  - 2 = Heun's method (faster, RK2)
+  - 4 = Classic RK4 (highest quality)
+- `taylor_order` (int, default=2): Taylor expansion order for virtual NFEs
+
+#### ER-SDE Beta
+
+- `gamma` (float, default=0.0): SDE noise injection strength
+  - 0.0 = Pure ODE (deterministic, fastest)
+  - 0.3 = Balanced (recommended for natural appearance)
+  - 1.0 = Maximum stochasticity
+- `beta_strength` (float, default=1.0): Beta distribution aggressiveness
+  - 1.0 = Gentle (sin², default)
+  - 2.0 = Moderate (sin⁴)
+  - 3.0+ = Aggressive (concentrates more at edges)
+
+#### Advanced Scheduler
+
+- `schedule` (str, default="linear"): Noise schedule type
+  - `"linear"`: Uniform spacing (baseline, fast)
+  - `"cosine"`: Smoother transitions, better perceptual quality
+  - `"exponential"`: Faster early denoising, refined details at end
+  - `"sqrt"`: Preserves structure, good detail in complex areas
+  - `"scaled_linear"`: Adaptive scaling for different image types
+  - `"beta"`: Beta distribution (concentrates steps at edges)
+- `exponential_beta` (float, default=2.0): Beta parameter for exponential schedule (range: 1.0-3.0)
+- `beta_alpha` (float, default=0.6): Alpha parameter for beta schedule
+- `beta_beta` (float, default=0.6): Beta parameter for beta schedule
 
 ## 🧪 Testing
 
