@@ -32,7 +32,7 @@ import math
 
 import mlx.core as mx
 
-from ..base_scheduler import BaseScheduler
+from mflux.models.common.schedulers.base_scheduler import BaseScheduler
 
 
 class ERSDEBetaScheduler(BaseScheduler):
@@ -57,12 +57,14 @@ class ERSDEBetaScheduler(BaseScheduler):
         config,
         gamma: float = 0.0,
         beta_strength: float = 1.0,
+        shift: float | None = None,
         **kwargs,
     ):
         self.config = config
         self.model_config = config.model_config
         self.gamma = gamma
         self.beta_strength = beta_strength
+        self.shift = shift
 
         # Validate parameters
         if gamma < 0.0:
@@ -111,13 +113,19 @@ class ERSDEBetaScheduler(BaseScheduler):
         """
         Apply exponential sigma shift for resolution-dependent adjustment.
         Same logic as LinearScheduler for consistency.
+
+        If self.shift is set, uses that value directly as mu instead of
+        computing it from image dimensions.
         """
-        # Calculate mu based on resolution
-        y1 = 0.5
-        x1 = 256
-        m = (1.15 - y1) / (4096 - x1)
-        b = y1 - m * x1
-        mu = m * self.config.width * self.config.height / 256 + b
+        if self.shift is not None:
+            mu = self.shift
+        else:
+            # Calculate mu based on resolution
+            y1 = 0.5
+            x1 = 256
+            m = (1.15 - y1) / (4096 - x1)
+            b = y1 - m * x1
+            mu = m * self.config.width * self.config.height / 256 + b
 
         # Apply exponential shift
         shifted_sigmas = []
@@ -161,12 +169,13 @@ class ERSDEBetaScheduler(BaseScheduler):
         sigma_t = self._sigmas[timestep]
         sigma_next = self._sigmas[timestep + 1]
 
-        # Compute step size (dt)
-        dt = sigma_next - sigma_t
+        # Compute step size (dt) - cast to latents dtype to avoid float32 promotion
+        # which causes mx.compile to retrace the graph and double memory usage
+        dt = (sigma_next - sigma_t).astype(latents.dtype)
 
         # ODE component: Euler step for Flow Matching
         # This is the base deterministic update
-        pred_sample = latents + dt * noise
+        pred_sample = latents + dt * noise.astype(latents.dtype)
 
         # Optional SDE component: add controlled noise
         # This can improve quality and naturalness but adds stochasticity

@@ -1,17 +1,18 @@
 """
 DDIM-style Scheduler for Flow Matching
 
-This scheduler implements true DDIM-style accelerated sampling using subsequence
-sampling (timestep skipping) for Flow Matching models. Unlike linear schedulers
-that use all timesteps, DDIM samples from a larger timestep space using strategic
-skipping to achieve faster convergence.
+This scheduler implements true DDIM-style accelerated sampling using UNIFORM
+subsequence sampling (timestep skipping) for Flow Matching models. DDIM works by
+selecting a uniform subset of timesteps from a larger timestep space (e.g., 10 steps
+from 1000 total timesteps).
 
 Key features:
-- True DDIM subsequence sampling (timestep skipping)
+- True DDIM uniform timestep skipping (not quadratic spacing)
+- Samples subsequence: [0, 111, 222, 333, ...] from [0, 1, 2, ..., 999]
 - 10x-50x faster than standard Euler methods
 - Deterministic sampling when eta=0
 - Compatible with FLUX, Qwen, Z-Image, and FIBO models
-- Different from Linear scheduler through strategic timestep selection
+- Different from Linear scheduler through uniform timestep skipping
 
 Reference: https://diffusionflow.github.io/
 
@@ -24,16 +25,20 @@ Example usage:
 
 import mlx.core as mx
 
-from ..base_scheduler import BaseScheduler
+from mflux.models.common.schedulers.base_scheduler import BaseScheduler
 
 
 class DDIMFlowScheduler(BaseScheduler):
     """
-    True DDIM-style scheduler with subsequence sampling for Flow Matching.
+    True DDIM-style scheduler with UNIFORM subsequence sampling for Flow Matching.
 
-    This scheduler achieves acceleration by sampling from a larger timestep space
-    (num_train_timesteps) using only num_inference_steps strategically selected
-    timesteps. This subsequence approach is the core of DDIM acceleration.
+    This scheduler achieves acceleration by uniformly sampling from a larger timestep
+    space (num_train_timesteps) using only num_inference_steps. For example, with
+    1000 total timesteps and 10 inference steps, it samples every 100th timestep:
+    [0, 100, 200, 300, 400, 500, 600, 700, 800, 900] (reversed for denoising).
+
+    This uniform skipping is the core of DDIM acceleration and is different from
+    quadratic or other non-uniform spacing methods.
 
     Args:
         config: mflux Config object containing model configuration and parameters
@@ -44,11 +49,12 @@ class DDIMFlowScheduler(BaseScheduler):
         **kwargs: Additional arguments (for compatibility)
     """
 
-    def __init__(self, config, eta: float = 0.0, num_train_timesteps: int = 1000, **kwargs):
+    def __init__(self, config, eta: float = 0.0, num_train_timesteps: int = 1000, shift: float | None = None, **kwargs):
         self.config = config
         self.model_config = config.model_config
         self.eta = eta
         self.num_train_timesteps = num_train_timesteps
+        self.shift = shift
 
         # Validate parameters
         if not 0.0 <= eta <= 1.0:
@@ -64,53 +70,54 @@ class DDIMFlowScheduler(BaseScheduler):
         Compute timesteps and sigmas using DDIM subsequence sampling.
 
         DDIM acceleration works by sampling from a larger timestep space
-        (num_train_timesteps) using only num_inference_steps strategically
+        (num_train_timesteps) using only num_inference_steps uniformly
         selected timesteps. This is the key difference from Linear scheduler.
 
-        Example: num_train_timesteps=1000, num_inference_steps=10
-        -> timesteps = [0, 100, 200, 300, 400, 500, 600, 700, 800, 900]
-        This "skipping" is what makes DDIM faster than linear approaches.
+        Example: num_train_timesteps=1000, num_inference_steps=9
+        -> step_ratio = 111.11
+        -> timesteps = [111, 222, 333, 444, 556, 667, 778, 889, 1000]
+        -> reversed = [1000, 889, 778, 667, 556, 444, 333, 222, 111]
+        -> sigmas = [1.0, 0.889, 0.778, 0.667, 0.556, 0.444, 0.333, 0.222, 0.111, 0.0]
+
+        This ensures DDIM starts from sigma=1.0 (full noise) like the original DDIM paper.
         """
         num_steps = self.config.num_inference_steps
 
-        # DDIM subsequence sampling with quadratic spacing for true DDIM behavior
-        # Unlike linear Euler which uses uniform spacing, DDIM concentrates more
-        # steps at high noise (beginning) using quadratic distribution
-        # This is the key difference that makes DDIM truly different from Euler
+        # DDIM subsequence sampling with UNIFORM spacing (true DDIM)
+        # Use floating point step ratio to ensure we reach num_train_timesteps
+        step_ratio = self.num_train_timesteps / num_steps
 
-        # Generate quadratically spaced indices for more steps early on
-        # t_i = (1 - (i/n)^2) for i in [0, n]
+        # Generate timesteps: [step_ratio, 2*step_ratio, ..., num_steps*step_ratio]
+        # This ensures the last timestep is num_train_timesteps (1000)
         timestep_indices = []
-        for i in range(num_steps):
-            # Quadratic spacing: more dense at the beginning (high noise)
-            t_normalized = 1.0 - (i / num_steps) ** 2
-            t_index = int(t_normalized * self.num_train_timesteps)
-            timestep_indices.append(t_index)
+        for i in range(1, num_steps + 1):
+            timestep = round(i * step_ratio)
+            timestep_indices.append(min(timestep, self.num_train_timesteps))
 
         timestep_indices = mx.array(timestep_indices, dtype=mx.int32)
 
+        # Reverse for denoising: high noise (1000) -> low noise (111)
+        timestep_indices = timestep_indices[::-1]
+
         # Convert timestep indices to sigma values
         # High timestep (1000) -> high sigma (1.0 = pure noise)
-        # Low timestep (88, etc.) -> low sigma (~0.088)
-        sigmas_raw = timestep_indices.astype(mx.float32) / self.num_train_timesteps
-
-        # For Flow Matching: sigma directly represents noise level
-        # We want: 1.0 (pure noise) -> 0.0 (clean data)
-        # By starting from num_train_timesteps, we ensure full coverage from 1.0
-        sigmas = sigmas_raw
+        # Low timestep (111) -> low sigma (~0.111)
+        sigmas = timestep_indices.astype(mx.float32) / self.num_train_timesteps
 
         # Append final sigma (0.0 for clean data)
         sigmas = mx.concatenate([sigmas, mx.zeros(1)])
 
         # Apply sigma shift if required by the model
         if self.model_config.requires_sigma_shift:
-            # Same shift logic as LinearScheduler
-            y1 = 0.5
-            x1 = 256
-            m = (1.15 - y1) / (4096 - x1)
-            b = y1 - m * x1
-            mu = m * self.config.width * self.config.height / 256 + b
-            mu = mx.array(mu)
+            if self.shift is not None:
+                mu = mx.array(self.shift)
+            else:
+                y1 = 0.5
+                x1 = 256
+                m = (1.15 - y1) / (4096 - x1)
+                b = y1 - m * x1
+                mu = m * self.config.width * self.config.height / 256 + b
+                mu = mx.array(mu)
 
             # Apply exponential shift
             shifted_sigmas = []
@@ -160,12 +167,13 @@ class DDIMFlowScheduler(BaseScheduler):
         sigma_t = self._sigmas[timestep]
         sigma_t_minus_1 = self._sigmas[timestep + 1]
 
-        # Compute the step size
-        dt = sigma_t_minus_1 - sigma_t
+        # Compute the step size (cast to latents dtype to avoid float32 promotion
+        # which causes mx.compile to retrace the graph and double memory usage)
+        dt = (sigma_t_minus_1 - sigma_t).astype(latents.dtype)
 
         # DDIM-style update for Flow Matching
         # This is Euler integration: x_{t+dt} = x_t + dt * v(x_t, t)
-        pred_sample = latents + dt * noise
+        pred_sample = latents + dt * noise.astype(latents.dtype)
 
         # Optional: Add stochasticity for eta > 0
         if self.eta > 0 and timestep < len(self._timesteps) - 1:

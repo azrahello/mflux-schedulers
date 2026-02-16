@@ -29,6 +29,20 @@ Example usage:
     ...     scheduler_kwargs={"schedule": "beta", "beta_alpha": 2.0, "beta_beta": 1.0},
     ...     num_inference_steps=30
     ... )
+    >>>
+    >>> # Karras (concentrates steps at end for finer details)
+    >>> config = Config(
+    ...     scheduler="mflux.contrib.schedulers.advanced",
+    ...     scheduler_kwargs={"schedule": "karras", "karras_rho": 7.0},
+    ...     num_inference_steps=20
+    ... )
+    >>>
+    >>> # Override sigma shift (mu) for manual control
+    >>> config = Config(
+    ...     scheduler="mflux.contrib.schedulers.advanced",
+    ...     scheduler_kwargs={"schedule": "cosine", "shift": 3.0},
+    ...     num_inference_steps=20
+    ... )
 """
 
 import math
@@ -36,7 +50,7 @@ from typing import Literal
 
 import mlx.core as mx
 
-from ..base_scheduler import BaseScheduler
+from mflux.models.common.schedulers.base_scheduler import BaseScheduler
 
 
 class FlowMatchAdvancedScheduler(BaseScheduler):
@@ -54,9 +68,14 @@ class FlowMatchAdvancedScheduler(BaseScheduler):
                  - "sqrt": Preserves structure, good detail in complex areas
                  - "scaled_linear": Adaptive scaling for different image types
                  - "beta": Beta distribution (complex, concentrates steps at edges)
+                 - "karras": Karras sigma schedule from EDM paper (concentrates steps at end)
         exponential_beta: Beta parameter for exponential schedule (default: 2.0, range: 1.0-3.0 recommended)
+        karras_rho: Rho parameter for Karras schedule (default: 7.0, from EDM paper)
         beta_alpha: Alpha parameter for beta schedule (default: 0.6)
         beta_beta: Beta parameter for beta schedule (default: 0.6)
+        shift: Override the automatic sigma shift (mu) value. By default, mu is computed
+               from image dimensions. Higher values push the noise schedule towards higher
+               noise levels. Set to None to use automatic computation. (default: None)
         **kwargs: Additional arguments for compatibility
 
     Examples:
@@ -71,23 +90,33 @@ class FlowMatchAdvancedScheduler(BaseScheduler):
 
         # Beta RES_2M (from ComfyUI/Reddit)
         --scheduler advanced --scheduler-kwargs '{"schedule": "beta", "beta_alpha": 2.0, "beta_beta": 1.0}'
+
+        # Karras (finer details at end of denoising)
+        --scheduler advanced --scheduler-kwargs '{"schedule": "karras", "karras_rho": 7.0}'
+
+        # Manual shift override
+        --scheduler advanced --scheduler-kwargs '{"schedule": "cosine", "shift": 3.0}'
     """
 
     def __init__(
         self,
         config,
-        schedule: Literal["linear", "cosine", "exponential", "sqrt", "scaled_linear", "beta"] = "linear",
+        schedule: Literal["linear", "cosine", "exponential", "sqrt", "scaled_linear", "beta", "karras"] = "linear",
         exponential_beta: float = 2.0,
+        karras_rho: float = 7.0,
         beta_alpha: float = 0.6,
         beta_beta: float = 0.6,
+        shift: float | None = None,
         **kwargs,
     ):
         self.config = config
         self.model_config = config.model_config
         self.schedule = schedule
         self.exponential_beta = exponential_beta
+        self.karras_rho = karras_rho
         self.beta_alpha = beta_alpha
         self.beta_beta = beta_beta
+        self.shift = shift
 
         # Compute sigma schedule
         self._sigmas, self._timesteps = self._compute_timesteps_and_sigmas()
@@ -107,6 +136,8 @@ class FlowMatchAdvancedScheduler(BaseScheduler):
             timesteps_normalized = self._sqrt_schedule(num_steps)
         elif self.schedule == "scaled_linear":
             timesteps_normalized = self._scaled_linear_schedule(num_steps)
+        elif self.schedule == "karras":
+            timesteps_normalized = self._karras_schedule(num_steps)
         else:  # linear
             timesteps_normalized = self._linear_schedule(num_steps)
 
@@ -129,52 +160,36 @@ class FlowMatchAdvancedScheduler(BaseScheduler):
 
     def _cosine_schedule(self, num_steps: int) -> list[float]:
         """
-        Cosine noise schedule.
+        Cosine sigma schedule: S-curve that allocates more steps at high/low noise.
 
-        Provides smoother transitions between noise levels using cosine function.
-        Often results in better perceptual quality.
-
-        Formula: cos(((t + s) / (1 + s)) * π/2)²
-        where s = 0.008 (small offset to avoid singularities)
+        Uses the simple half-wave cosine: sigma = (1 + cos(π·t)) / 2
+        Generates N sigmas (matching PR #353 convention) + trailing 0.0.
         """
-        s = 0.008  # Small offset
         timesteps = []
-
-        for i in range(num_steps + 1):
-            t = i / num_steps
-            # Cosine schedule: cos((t+s)/(1+s) * π/2)²
-            value = math.cos(((t + s) / (1.0 + s)) * math.pi * 0.5) ** 2
-            timesteps.append(value)
-
-        # Normalize to [0, 1]
-        first = timesteps[0]
-        timesteps = [t / first for t in timesteps]
-
-        # Invert so it goes from 0 to 1 (not 1 to 0)
-        timesteps = [1.0 - t for t in timesteps]
-
+        for i in range(num_steps):
+            t = i / max(num_steps - 1, 1)
+            sigma = (1.0 + math.cos(t * math.pi)) / 2.0
+            timesteps.append(1.0 - sigma)
+        timesteps.append(1.0)  # trailing zero sigma
         return timesteps
 
     def _exponential_schedule(self, num_steps: int) -> list[float]:
         """
-        Exponential noise schedule.
+        Exponential sigma schedule: logarithmic spacing between sigma_max and sigma_min.
 
-        Accelerates denoising at the beginning and slows at the end for
-        more detail refinement.
-
-        Uses a gentler exponential curve that's more compatible with Flow Matching.
+        Produces true log-spaced sigmas: exp(linspace(log(σ_max), log(σ_min), N)).
+        Uses sigma_min = 1/1000 (standard diffusion timestep space).
         """
+        sigma_max = 1.0
+        sigma_min = 1.0 / 1000  # 1/num_train_timesteps
+        log_max = math.log(sigma_max)
+        log_min = math.log(sigma_min)
+
         timesteps = []
-        for i in range(num_steps + 1):
-            t = i / num_steps
-            # Gentler exponential: use (1 - t)^beta instead of exp(-beta*t)
-            # This gives more control and better convergence
-            value = (1.0 - t) ** self.exponential_beta
-            timesteps.append(value)
-
-        # These values go from 1.0 to 0.0, need to invert for timesteps
-        timesteps = [1.0 - t for t in timesteps]
-
+        for i in range(num_steps):
+            sigma = math.exp(log_max + i * (log_min - log_max) / max(num_steps - 1, 1))
+            timesteps.append(1.0 - sigma)
+        timesteps.append(1.0)  # trailing zero sigma
         return timesteps
 
     def _sqrt_schedule(self, num_steps: int) -> list[float]:
@@ -416,17 +431,53 @@ class FlowMatchAdvancedScheduler(BaseScheduler):
         """Compute log of beta function: log(B(a,b)) = log(Γ(a)) + log(Γ(b)) - log(Γ(a+b))"""
         return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
 
+    def _karras_schedule(self, num_steps: int) -> list[float]:
+        """
+        Karras sigma schedule from the EDM paper (arXiv:2206.00364).
+
+        Concentrates denoising steps towards the end (low noise levels) where
+        fine details are resolved. Uses inverse power-law interpolation between
+        sigma_max and sigma_min with exponent rho.
+
+        The rho parameter controls the concentration:
+        - rho=1: equivalent to linear
+        - rho=7: standard EDM (concentrates at end)
+        - rho>7: even more concentration at low noise
+
+        Formula: sigma_i = (sigma_max^(1/rho) + i/(N-1) * (sigma_min^(1/rho) - sigma_max^(1/rho)))^rho
+        """
+        rho = self.karras_rho
+        sigma_max = 1.0
+        sigma_min = 1.0 / 1000  # 1/num_train_timesteps (standard diffusion)
+        min_inv_rho = sigma_min ** (1.0 / rho)
+        max_inv_rho = sigma_max ** (1.0 / rho)
+
+        timesteps = []
+        for i in range(num_steps):
+            ramp = i / max(num_steps - 1, 1)
+            sigma = (max_inv_rho + ramp * (min_inv_rho - max_inv_rho)) ** rho
+            timesteps.append(1.0 - sigma)
+        timesteps.append(1.0)  # trailing zero sigma
+        return timesteps
+
     def _apply_sigma_shift(self, sigmas: list[float]) -> list[float]:
         """
         Apply exponential sigma shift for resolution-dependent adjustment.
         Same logic as LinearScheduler for consistency.
+
+        If self.shift is set, uses that value directly as mu instead of
+        computing it from image dimensions.
         """
-        # Calculate mu based on resolution
-        y1 = 0.5
-        x1 = 256
-        m = (1.15 - y1) / (4096 - x1)
-        b = y1 - m * x1
-        mu = m * self.config.width * self.config.height / 256 + b
+        if self.shift is not None:
+            # Use manual override
+            mu = self.shift
+        else:
+            # Calculate mu based on resolution
+            y1 = 0.5
+            x1 = 256
+            m = (1.15 - y1) / (4096 - x1)
+            b = y1 - m * x1
+            mu = m * self.config.width * self.config.height / 256 + b
 
         # Apply exponential shift
         shifted_sigmas = []
@@ -469,11 +520,12 @@ class FlowMatchAdvancedScheduler(BaseScheduler):
         sigma_t = self._sigmas[timestep]
         sigma_next = self._sigmas[timestep + 1]
 
-        # Compute step size (dt)
-        dt = sigma_next - sigma_t
+        # Compute step size (dt) - cast to latents dtype to avoid float32 promotion
+        # which causes mx.compile to retrace the graph and double memory usage
+        dt = (sigma_next - sigma_t).astype(latents.dtype)
 
         # Euler step for Flow Matching
-        pred_sample = latents + dt * noise
+        pred_sample = latents + dt * noise.astype(latents.dtype)
 
         return pred_sample
 

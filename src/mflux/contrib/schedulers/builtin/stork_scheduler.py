@@ -32,7 +32,7 @@ import math
 
 import mlx.core as mx
 
-from ..base_scheduler import BaseScheduler
+from mflux.models.common.schedulers.base_scheduler import BaseScheduler
 
 
 class STORKScheduler(BaseScheduler):
@@ -50,13 +50,14 @@ class STORKScheduler(BaseScheduler):
         **kwargs: Additional arguments for compatibility
     """
 
-    def __init__(self, config, order: int = 2, **kwargs):
+    def __init__(self, config, order: int = 2, shift: float | None = None, **kwargs):
         if order not in [2, 4]:
             raise ValueError(f"STORK order must be 2 or 4, got {order}")
 
         self.config = config
         self.model_config = config.model_config
         self.order = order
+        self.shift = shift
 
         # Storage for velocity history (for Taylor approximations)
         self.velocity_history: list[mx.array] = []
@@ -97,9 +98,12 @@ class STORKScheduler(BaseScheduler):
         base_image_seq_len = 256
         max_image_seq_len = 8192
 
-        m = (max_shift - base_shift) / (max_image_seq_len - base_image_seq_len)
-        b = base_shift - m * base_image_seq_len
-        mu = m * seq_len + b
+        if self.shift is not None:
+            mu = self.shift
+        else:
+            m = (max_shift - base_shift) / (max_image_seq_len - base_image_seq_len)
+            b = base_shift - m * base_image_seq_len
+            mu = m * seq_len + b
 
         # Generate linear timesteps
         sigma_min = 1.0 / num_train_timesteps
@@ -234,7 +238,9 @@ class STORKScheduler(BaseScheduler):
         # Get current and next sigma
         sigma_t = self._sigmas[timestep]
         sigma_next = self._sigmas[timestep + 1]
-        dt = sigma_next - sigma_t
+        # Cast to latents dtype to avoid float32 promotion
+        # which causes mx.compile to retrace the graph and double memory usage
+        dt = (sigma_next - sigma_t).astype(latents.dtype)
 
         # Store the current velocity (noise) for future approximations
         self.velocity_history.append(noise)
