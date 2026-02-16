@@ -1,337 +1,182 @@
 # mflux-schedulers
 
-Advanced schedulers for [mflux](https://github.com/filipstrand/mflux) - Apple MLX port of FLUX, Qwen, Z-Image and other diffusion models.
+Advanced schedulers for [mflux](https://github.com/filipstrand/mflux) — the Apple MLX port of FLUX, Qwen, Z-Image and other diffusion models.
 
-## 🚀 Features
-
-- **10x-50x Faster Generation**: DDIM-style sampling for quick high-quality images
-- **Better Quality**: Advanced sampling techniques from latest research papers
-- **Production Ready**: Tested with FLUX, Qwen, Z-Image, and FIBO models
-- **Easy Integration**: Drop-in replacement for built-in schedulers
-- **Robust Architecture**: Factory pattern, metadata system, deprecation support
-
-## 📦 Installation
+## Installation
 
 ```bash
 pip install mflux-schedulers
 ```
 
-## 🎯 Quick Start
-
-### CLI Usage
+Or from source:
 
 ```bash
-# Use DDIM scheduler (10x faster than default)
-mflux-generate \
-  --model schnell \
-  --prompt "a beautiful sunset" \
-  --scheduler mflux.contrib.schedulers.ddim \
-  --steps 10
-
-# Compare: default linear scheduler needs 50 steps for similar quality
-mflux-generate \
-  --model schnell \
-  --prompt "a beautiful sunset" \
-  --scheduler linear \
-  --steps 50
+git clone https://github.com/azrahello/mflux-schedulers.git
+cd mflux-schedulers
+pip install -e .
 ```
 
-### Python Usage
+## Quick Start
+
+All schedulers work as drop-in replacements via the `--scheduler` flag:
+
+```bash
+# DDIM Flow Matching
+mflux-generate-z-image-turbo \
+  --prompt "a beautiful sunset" \
+  --scheduler mflux.contrib.schedulers.DDIMFlowScheduler \
+  --steps 9 --seed 42
+
+# Karras sigma schedule
+mflux-generate-z-image-turbo \
+  --prompt "a beautiful sunset" \
+  --scheduler mflux.contrib.schedulers.karras \
+  --steps 9 --seed 42
+```
+
+Works with all mflux model commands: `mflux-generate`, `mflux-generate-qwen`, `mflux-generate-z-image-turbo`, etc.
+
+## Available Schedulers
+
+### Core Schedulers
+
+| Scheduler | CLI path | Description |
+|-----------|----------|-------------|
+| **DDIM Flow** | `mflux.contrib.schedulers.DDIMFlowScheduler` | DDIM-style uniform timestep skipping for Flow Matching |
+| **STORK** | `mflux.contrib.schedulers.STORKScheduler` | Stabilized Runge-Kutta with Taylor approximations |
+| **ER-SDE Beta** | `mflux.contrib.schedulers.ERSDEBetaScheduler` | Extended Reverse-Time SDE with Beta timestep distribution |
+| **Advanced** | `mflux.contrib.schedulers.FlowMatchAdvancedScheduler` | Multiple noise schedule types (cosine, exponential, sqrt, beta) |
+
+### Sigma Schedule Presets
+
+These presets modify the sigma schedule shape while using standard Euler integration:
+
+| Preset | CLI path | Description |
+|--------|----------|-------------|
+| **Karras** | `mflux.contrib.schedulers.karras` | Karras noise schedule (concentrated steps at low noise) |
+| **Cosine** | `mflux.contrib.schedulers.cosine` | Cosine schedule for smoother transitions |
+| **Exponential** | `mflux.contrib.schedulers.exponential` | Exponential schedule for faster early denoising |
+| **Sqrt** | `mflux.contrib.schedulers.sqrt` | Square root schedule |
+| **Beta** | `mflux.contrib.schedulers.beta` | Beta distribution schedule |
+| **Scaled Linear** | `mflux.contrib.schedulers.scaled_linear` | Scaled linear schedule |
+
+## Scheduler Details
+
+### DDIM Flow Matching
+
+True DDIM-style accelerated sampling using uniform subsequence sampling from a larger timestep space (e.g., 1000 total timesteps). Different from the built-in linear scheduler through strategic timestep selection.
+
+```bash
+mflux-generate-z-image-turbo \
+  --scheduler mflux.contrib.schedulers.DDIMFlowScheduler \
+  --steps 9 --seed 42 --prompt "a cat"
+```
+
+Parameters (configurable in Python):
+- `eta` (float, default=0.0): Stochasticity — 0.0 = deterministic, 1.0 = maximum noise
+- `num_train_timesteps` (int, default=1000): Total timestep space to sample from
+
+### STORK
+
+Stabilized Runge-Kutta methods with Taylor approximations for virtual NFEs (neural function evaluations). Uses higher-order integration for improved quality.
+
+```bash
+mflux-generate-z-image-turbo \
+  --scheduler mflux.contrib.schedulers.STORKScheduler \
+  --steps 9 --seed 42 --prompt "a cat"
+```
+
+Parameters:
+- `order` (int, default=2): RK order — 2 = Heun's method, 4 = classic RK4
+
+### ER-SDE Beta
+
+Extended Reverse-Time SDE with optional stochastic noise injection and Beta timestep distribution for detail preservation.
+
+```bash
+mflux-generate-z-image-turbo \
+  --scheduler mflux.contrib.schedulers.ERSDEBetaScheduler \
+  --steps 9 --seed 42 --prompt "a cat"
+```
+
+Parameters:
+- `gamma` (float, default=0.0): SDE noise strength — 0.0 = deterministic ODE
+- `beta_strength` (float, default=1.0): Beta distribution aggressiveness
+
+### Karras Schedule
+
+Karras noise schedule from the [Elucidating the Design Space of Diffusion-Based Generative Models](https://arxiv.org/abs/2206.00364) paper. Concentrates denoising steps at lower noise levels where detail refinement happens.
+
+```bash
+mflux-generate-z-image-turbo \
+  --scheduler mflux.contrib.schedulers.karras \
+  --steps 9 --seed 42 --prompt "a cat"
+```
+
+## Python Usage
 
 ```python
-from mflux import Flux1, Config
+from mflux.models.z_image.variants.z_image import ZImage
+from mflux.models.common.config.model_config import ModelConfig
 
-# Initialize model
-flux = Flux1.from_name("schnell")
+model = ZImage(model_config=ModelConfig.z_image_turbo())
 
-# Use DDIM scheduler
-config = Config(
-    scheduler="mflux.contrib.schedulers.ddim",
-    num_inference_steps=10,
-    height=1024,
-    width=1024,
-)
-
-# Generate image
-image = flux.generate_image(
+image = model.generate_image(
     seed=42,
-    prompt="a beautiful mountain landscape",
-    config=config
+    prompt="a beautiful landscape",
+    num_inference_steps=9,
+    scheduler="mflux.contrib.schedulers.DDIMFlowScheduler",
 )
 
 image.save("output.png")
 ```
 
-## 📊 Available Schedulers
-
-### DDIM Flow Matching ⭐ (Recommended)
-
-**Name**: `ddim`  
-**Status**: Stable  
-**Speed**: ★★★★★  
-**Quality**: ★★★★☆  
-
-True DDIM-style accelerated sampling with quadratic spacing.
-
-```python
-# Fast generation (4-10 steps)
-config = Config(scheduler="mflux.contrib.schedulers.ddim", num_inference_steps=10)
-
-# With stochasticity (more variety)
-config = Config(
-    scheduler="mflux.contrib.schedulers.DDIMFlowScheduler",
-    num_inference_steps=10,
-    scheduler_kwargs={"eta": 0.3}  # 0.0 = deterministic, 1.0 = stochastic
-)
-```
-
-**Best for**: Quick generation, iteration, previews  
-**Papers**: [DDIM](https://diffusionflow.github.io/)
-
----
-
-### STORK ⭐
-
-**Name**: `stork`, `stork-2`, `stork-4`
-**Status**: Stable
-**Speed**: ★★★★☆
-**Quality**: ★★★★★
-
-Stabilized Runge-Kutta methods with Taylor approximations for virtual NFEs.
-
-```python
-# STORK-2 (Heun's method, faster)
-config = Config(scheduler="mflux.contrib.schedulers.stork-2", num_inference_steps=20)
-
-# STORK-4 (RK4, highest quality)
-config = Config(scheduler="mflux.contrib.schedulers.stork-4", num_inference_steps=15)
-```
-
-**Best for**: Highest quality with moderate speed, complex scenes
-**Papers**: [STORK](https://arxiv.org/html/2505.24210v2)
-
----
-
-### ER-SDE Beta
-
-**Name**: `er_sde_beta`
-**Status**: Stable
-**Speed**: ★★★☆☆
-**Quality**: ★★★★★
-
-Extended Reverse-Time SDE with Beta timestep distribution for superior detail preservation.
-
-```python
-# Deterministic Beta sampling (best quality)
-config = Config(scheduler="mflux.contrib.schedulers.er_sde_beta", num_inference_steps=30)
-
-# With SDE component (more natural)
-config = Config(
-    scheduler="mflux.contrib.schedulers.er_sde_beta",
-    num_inference_steps=30,
-    scheduler_kwargs={"gamma": 0.3, "beta_strength": 1.0}
-)
-```
-
-**Best for**: Maximum detail, natural appearance, portraits
-**Papers**: [ER-SDE](https://arxiv.org/abs/2309.06169), [Beta Sampling](https://arxiv.org/abs/2407.12173)
-
----
-
-### Advanced Scheduler
-
-**Name**: `advanced`
-**Status**: Beta
-**Speed**: ★★★★☆
-**Quality**: ★★★★☆
-
-Multiple noise schedules: Linear, Cosine, Exponential, Sqrt, Scaled Linear, Beta.
-
-```python
-# Cosine schedule (smooth, good perceptual quality)
-config = Config(
-    scheduler="mflux.contrib.schedulers.advanced",
-    scheduler_kwargs={"schedule": "cosine"}
-)
-
-# Beta distribution (concentrates steps at edges)
-config = Config(
-    scheduler="mflux.contrib.schedulers.advanced",
-    scheduler_kwargs={"schedule": "beta", "beta_alpha": 2.0, "beta_beta": 1.0}
-)
-```
-
-**Best for**: Experimentation with different noise schedules
-**Papers**: [DDPM](https://arxiv.org/abs/2006.11239), [Beta Sampling](https://arxiv.org/abs/2407.12173)
-
----
-
-## 🔧 Advanced Usage
-
-### List Available Schedulers
+## API
 
 ```python
 import mflux.contrib.schedulers as schedulers
 
-# List all schedulers
-print(schedulers.list_schedulers())
-# ['ddim', 'stork', 'stork-2', 'stork-4', 'er_sde_beta', 'advanced']
+# List all available schedulers
+schedulers.list_schedulers()
 
 # List only stable schedulers
-print(schedulers.list_schedulers('stable'))
-# ['ddim', 'stork', 'stork-2', 'stork-4', 'er_sde_beta']
-```
+schedulers.list_schedulers('stable')
 
-### Get Scheduler Info
-
-```python
+# Get scheduler info
 info = schedulers.get_scheduler_info('ddim')
-print(info)
-# {
-#   'name': 'ddim',
-#   'display_name': 'DDIM Flow Matching',
-#   'description': 'True DDIM-style accelerated sampling with quadratic spacing',
-#   'status': 'stable',
-#   'version': '1.0.0',
-#   'typical_steps': {'min': 4, 'max': 20},
-#   'performance': {'speed': 5, 'quality': 4},
-#   ...
-# }
 ```
 
-### Custom Scheduler Parameters
-
-```python
-from mflux import Config
-
-# DDIM with custom parameters
-config = Config(
-    scheduler="mflux.contrib.schedulers.ddim",
-    num_inference_steps=15,
-    scheduler_kwargs={
-        "eta": 0.0,  # Deterministic (default)
-        "num_train_timesteps": 1000,  # Total timestep space
-    }
-)
-```
-
-## 📚 Documentation
-
-### Scheduler Parameters
-
-#### DDIM Flow Matching
-
-- `eta` (float, default=0.0): Stochasticity parameter
-  - 0.0 = fully deterministic, fastest
-  - 0.3 = balanced
-  - 1.0 = maximum stochasticity
-- `num_train_timesteps` (int, default=1000): Total timestep space to sample from
-
-#### STORK
-
-- `order` (int, default=2): Runge-Kutta order
-  - 2 = Heun's method (faster, RK2)
-  - 4 = Classic RK4 (highest quality)
-- `taylor_order` (int, default=2): Taylor expansion order for virtual NFEs
-
-#### ER-SDE Beta
-
-- `gamma` (float, default=0.0): SDE noise injection strength
-  - 0.0 = Pure ODE (deterministic, fastest)
-  - 0.3 = Balanced (recommended for natural appearance)
-  - 1.0 = Maximum stochasticity
-- `beta_strength` (float, default=1.0): Beta distribution aggressiveness
-  - 1.0 = Gentle (sin², default)
-  - 2.0 = Moderate (sin⁴)
-  - 3.0+ = Aggressive (concentrates more at edges)
-
-#### Advanced Scheduler
-
-- `schedule` (str, default="linear"): Noise schedule type
-  - `"linear"`: Uniform spacing (baseline, fast)
-  - `"cosine"`: Smoother transitions, better perceptual quality
-  - `"exponential"`: Faster early denoising, refined details at end
-  - `"sqrt"`: Preserves structure, good detail in complex areas
-  - `"scaled_linear"`: Adaptive scaling for different image types
-  - `"beta"`: Beta distribution (concentrates steps at edges)
-- `exponential_beta` (float, default=2.0): Beta parameter for exponential schedule (range: 1.0-3.0)
-- `beta_alpha` (float, default=0.6): Alpha parameter for beta schedule
-- `beta_beta` (float, default=0.6): Beta parameter for beta schedule
-
-## 🧪 Testing
-
-```bash
-# Install in development mode
-cd mflux-schedulers
-pip install -e .
-
-# Test import
-python -c "import mflux.contrib.schedulers; print(mflux.contrib.schedulers.list_schedulers())"
-
-# Test with mflux
-mflux-generate \
-  --model schnell \
-  --prompt "test image" \
-  --scheduler mflux.contrib.schedulers.ddim \
-  --steps 10 \
-  --seed 42
-```
-
-## 🏗️ Architecture
+## Architecture
 
 ```
 src/mflux/contrib/schedulers/
-├── __init__.py              # Main entry point
-├── base_scheduler.py        # Abstract base class
-├── scheduler_factory.py     # Factory pattern with validation
-├── scheduler_metadata.py    # Metadata and versioning
-└── builtin/                 # Production schedulers
-    ├── __init__.py
-    └── ddim_flow_scheduler.py
+├── __init__.py                  # Entry point, registration, API
+├── scheduler_factory.py         # Factory pattern with validation
+├── scheduler_metadata.py        # Metadata and versioning
+├── schedule_presets.py          # Sigma schedule presets (karras, cosine, etc.)
+└── builtin/
+    ├── ddim_flow_scheduler.py
+    ├── er_sde_beta_scheduler.py
+    ├── flow_match_advanced_scheduler.py
+    └── stork_scheduler.py
 ```
 
-### Key Features
+## Technical Notes
 
-- **Factory Pattern**: Type-safe scheduler creation with validation
-- **Metadata System**: Performance hints, compatibility info, references
-- **Deprecation Support**: Graceful migration path for old schedulers
-- **Future-Proof**: Easy to add new schedulers without breaking changes
+### dtype Compatibility
 
-## 🤝 Contributing
+All scheduler `step()` methods cast intermediate values to `latents.dtype` to prevent float32 promotion when sigmas are float32 and latents are bfloat16. Without this cast, `mx.compile` retraces the computation graph at step 1 (seeing a different input dtype), caching both graphs and doubling peak memory usage.
 
-We welcome contributions! To add a new scheduler:
+This matches the pattern used by mflux's built-in `LinearScheduler`.
 
-1. Create scheduler class inheriting from `BaseScheduler`
-2. Implement required methods: `sigmas`, `step`
-3. Add metadata to `scheduler_metadata.py`
-4. Register in `__init__.py`
-5. Add tests and documentation
+## References
 
-See `builtin/ddim_flow_scheduler.py` for a complete example.
+- [DDIM: Denoising Diffusion Implicit Models](https://arxiv.org/abs/2010.02502)
+- [STORK: Faster Diffusion and Flow Matching Sampling](https://arxiv.org/abs/2505.24210)
+- [Karras et al.: Elucidating the Design Space](https://arxiv.org/abs/2206.00364)
+- [Beta Sampling](https://arxiv.org/abs/2407.12173)
+- [ER-SDE](https://arxiv.org/abs/2309.06169)
 
-## 📄 License
+## License
 
-Same as mflux (check main repository)
-
-## 🙏 Acknowledgements
-
-- [mflux](https://github.com/filipstrand/mflux) - The amazing MLX port of FLUX
-- DDIM paper: [Denoising Diffusion Implicit Models](https://diffusionflow.github.io/)
-- STORK paper: [Faster Diffusion and Flow Matching Sampling](https://arxiv.org/html/2505.24210v2)
-- Beta Sampling paper: [arXiv:2407.12173](https://arxiv.org/abs/2407.12173)
-
-## 📊 Performance Comparison
-
-| Scheduler | Steps | Quality | Speed | Best For |
-|-----------|-------|---------|-------|----------|
-| linear (default) | 50 | ⭐⭐⭐ | ⭐⭐ | Baseline |
-| **ddim** | 10 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐⭐ | Quick iteration |
-| stork-2 | 15 | ⭐⭐⭐⭐ | ⭐⭐⭐⭐ | Balanced |
-| stork-4 | 20 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | Max quality |
-| er_sde_beta | 30 | ⭐⭐⭐⭐⭐ | ⭐⭐⭐ | Fine details |
-
-*Tested on Apple M2 Ultra with FLUX schnell*
-
----
-
-**Made with ❤️ for the mflux community**
+Same as [mflux](https://github.com/filipstrand/mflux).
