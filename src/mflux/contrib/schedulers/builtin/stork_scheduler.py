@@ -277,9 +277,11 @@ class STORKScheduler(BaseScheduler):
 
         # Combine stages using RK coefficients
         # x_{t+1} = x_t + dt * sum(b_i * k_i)
+        # Cast all intermediates to latents.dtype to avoid float32 promotion
+        # which causes mx.compile to retrace the graph and double memory usage
         update = mx.zeros_like(latents)
         for i in range(self.rk_stages):
-            update = update + self.rk_b[i] * k_stages[i]
+            update = update + mx.array(self.rk_b[i], dtype=latents.dtype) * k_stages[i].astype(latents.dtype)
 
         next_sample = latents + dt * update
 
